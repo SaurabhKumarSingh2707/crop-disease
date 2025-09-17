@@ -30,11 +30,44 @@ def decompress_model(compressed_file, output_file):
     """Decompress a gzipped model file"""
     print(f"Decompressing {compressed_file} to {output_file}...")
     
-    with gzip.open(compressed_file, 'rb') as f_in:
-        with open(output_file, 'wb') as f_out:
-            shutil.copyfileobj(f_in, f_out)
+    if not os.path.exists(compressed_file):
+        print(f"Error: {compressed_file} not found!")
+        return False
     
-    print("Decompression complete!")
+    try:
+        with gzip.open(compressed_file, 'rb') as f_in:
+            with open(output_file, 'wb') as f_out:
+                shutil.copyfileobj(f_in, f_out)
+        
+        print("Decompression complete!")
+        
+        # Verify decompressed file
+        if os.path.exists(output_file):
+            size = os.path.getsize(output_file)
+            print(f"Decompressed file size: {size / (1024*1024):.2f} MB")
+            return True
+        else:
+            print("Error: Decompressed file not created!")
+            return False
+            
+    except Exception as e:
+        print(f"Error during decompression: {e}")
+        return False
+
+def auto_decompress():
+    """Automatically decompress model if compressed version exists"""
+    compressed_file = "model_phase1.h5.gz"
+    output_file = "model_phase1.h5"
+    
+    if os.path.exists(compressed_file) and not os.path.exists(output_file):
+        print("🔄 Auto-decompressing model for deployment...")
+        return decompress_model(compressed_file, output_file)
+    elif os.path.exists(output_file):
+        print("✅ Model already decompressed")
+        return True
+    else:
+        print("⚠️ No model files found")
+        return False
 
 def setup_git_lfs():
     """Instructions for setting up Git LFS"""
@@ -64,11 +97,14 @@ if __name__ == "__main__":
     input_model = "model_phase1.h5"
     compressed_model = "model_phase1.h5.gz"
     
-    if len(sys.argv) > 1 and sys.argv[1] == "decompress":
-        if os.path.exists(compressed_model):
-            decompress_model(compressed_model, input_model)
-        else:
-            print(f"Compressed file {compressed_model} not found!")
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "decompress":
+            if os.path.exists(compressed_model):
+                decompress_model(compressed_model, input_model)
+            else:
+                print(f"Compressed file {compressed_model} not found!")
+        elif sys.argv[1] == "auto":
+            auto_decompress()
     else:
         # Compress the model
         if os.path.exists(input_model):

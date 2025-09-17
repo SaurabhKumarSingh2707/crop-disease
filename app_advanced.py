@@ -13,23 +13,63 @@ from predict_advanced import AdvancedPlantDiseasePredictor
 from werkzeug.utils import secure_filename
 import json
 from datetime import datetime
+import traceback
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'krishivannai-ai-plant-disease-prediction-secret-key'
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32MB max file size
 
+# Global error handler to ensure JSON responses
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """Handle unexpected exceptions and return JSON response"""
+    logger.error(f"Unhandled exception: {str(e)}\n{traceback.format_exc()}")
+    return jsonify({
+        'success': False,
+        'error': f'Internal server error: {str(e)}'
+    }), 500
+
+@app.errorhandler(404)
+def not_found(e):
+    """Handle 404 errors"""
+    if request.path.startswith('/api/') or request.path in ['/predict', '/batch_predict']:
+        return jsonify({
+            'success': False,
+            'error': 'Endpoint not found'
+        }), 404
+    return render_template('404.html'), 404
+
 # Create uploads directory if it doesn't exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Initialize the advanced predictor
-try:
-    predictor = AdvancedPlantDiseasePredictor()
-    print("✅ Advanced predictor initialized successfully")
-except Exception as e:
-    print(f"❌ Failed to initialize advanced predictor: {e}")
-    # You could fall back to basic predictor here if needed
-    predictor = None
+predictor = None
+
+def initialize_predictor():
+    """Initialize predictor with better error handling"""
+    global predictor
+    try:
+        # Check if model files exist
+        if not os.path.exists('best_model.h5') and not os.path.exists('model_phase1.h5'):
+            logger.error("No model files found. Please ensure model files are available.")
+            return False
+        
+        predictor = AdvancedPlantDiseasePredictor()
+        logger.info("✅ Advanced predictor initialized successfully")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize advanced predictor: {e}")
+        logger.error(traceback.format_exc())
+        return False
+
+# Try to initialize predictor
+initialize_predictor()
 
 # Allowed file extensions
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff', 'webp'}
@@ -95,21 +135,35 @@ def predict():
     try:
         # Check if predictor is available
         if not predictor:
-            return jsonify({'error': 'Prediction service unavailable'}), 503
+            logger.error("Predictor not available - attempting to reinitialize")
+            if not initialize_predictor():
+                return jsonify({
+                    'success': False,
+                    'error': 'Prediction service unavailable. Model not loaded.'
+                }), 503
         
         # Check if file was uploaded
         if 'file' not in request.files:
-            return jsonify({'error': 'No file uploaded'}), 400
+            return jsonify({
+                'success': False,
+                'error': 'No file uploaded'
+            }), 400
         
         file = request.files['file']
         
         # Check if file is selected
         if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
+            return jsonify({
+                'success': False,
+                'error': 'No file selected'
+            }), 400
         
         # Check file extension
         if not allowed_file(file.filename):
-            return jsonify({'error': 'Invalid file type. Please upload PNG, JPG, JPEG, GIF, BMP, TIFF, or WebP files.'}), 400
+            return jsonify({
+                'success': False,
+                'error': 'Invalid file type. Please upload PNG, JPG, JPEG, GIF, BMP, TIFF, or WebP files.'
+            }), 400
         
         # Get prediction options from form
         use_tta = request.form.get('use_tta', 'true').lower() == 'true'
@@ -120,7 +174,11 @@ def predict():
         try:
             image_array, original_image_b64, image_info = process_uploaded_image(file)
         except Exception as e:
-            return jsonify({'error': f'Error processing image: {str(e)}'}), 400
+            logger.error(f"Error processing image: {e}")
+            return jsonify({
+                'success': False,
+                'error': f'Error processing image: {str(e)}'
+            }), 400
         
         # Make prediction
         try:
@@ -145,10 +203,18 @@ def predict():
             })
             
         except Exception as e:
-            return jsonify({'error': f'Error making prediction: {str(e)}'}), 500
+            logger.error(f"Error making prediction: {e}")
+            return jsonify({
+                'success': False,
+                'error': f'Error making prediction: {str(e)}'
+            }), 500
     
     except Exception as e:
-        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
+        logger.error(f"Unexpected error in predict: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'Unexpected error: {str(e)}'
+        }), 500
 
 @app.route('/batch_predict', methods=['POST'])
 def batch_predict():
@@ -230,6 +296,21 @@ def about():
 if __name__ == '__main__':
     print("🚀 Starting KrishiVannai AI Plant Disease Prediction App...")
     
+    # Decompress model if needed
+    if os.path.exists('model_phase1.h5.gz') and not os.path.exists('model_phase1.h5'):
+        print("📦 Decompressing model file...")
+        try:
+            import gzip
+            import shutil
+            with gzip.open('model_phase1.h5.gz', 'rb') as f_in:
+                with open('model_phase1.h5', 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+            print("✅ Model decompressed successfully")
+            # Reinitialize predictor after decompression
+            initialize_predictor()
+        except Exception as e:
+            print(f"❌ Failed to decompress model: {e}")
+    
     if predictor:
         model_info = predictor.get_model_info()
         print(f"📊 Model Type: {model_info['model_type']}")
@@ -240,5 +321,9 @@ if __name__ == '__main__':
     else:
         print("⚠️ Predictor not available - check model files")
     
-    print("🌐 Access KrishiVannai AI at: http://127.0.0.1:5000")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # Use environment variable for port (Render sets this)
+    port = int(os.environ.get('PORT', 5000))
+    debug_mode = os.environ.get('FLASK_ENV') != 'production'
+    
+    print(f"🌐 Starting server on port {port}")
+    app.run(debug=debug_mode, host='0.0.0.0', port=port)
